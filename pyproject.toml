@@ -11,4 +11,13 @@ dependencies = [
     "inngest>=0.4",
     "dbos>=1.0",
     "pydantic>=2.13.3",
+    "sdk",
 ]
+
+[tool.uv.workspace]
+members = [
+    "sdk",
+]
+
+[tool.uv.sources]
+sdk = { workspace = true, editable = true }

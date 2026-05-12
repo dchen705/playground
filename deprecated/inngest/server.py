@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 import inngest.fast_api
-from agent import inngest_client, run_agent
+from deprecated.inngest.agent import inngest_client, run_agent
 
 app = FastAPI()
 
