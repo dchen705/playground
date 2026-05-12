@@ -21,8 +21,13 @@ playground/
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**2. Set your OpenAI key**
-Create your own .env file
+**2a. Create env file**
+```bash
+cp env.example .env
+
+```
+
+**2b. Set your OpenAI key**
 ```bash
 OPENAI_API_KEY=sk-...
 ```
@@ -30,8 +35,10 @@ OPENAI_API_KEY=sk-...
 **3. Install dependencies**
 ```bash
 cd playground
+
 // activate virtual env
 source .venv/bin/activate
+
 uv sync
 
 // To deactivate virtual env
