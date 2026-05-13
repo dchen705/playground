@@ -1,17 +1,32 @@
 import os
 from dbos import DBOS, DBOSConfig
-
+from typing import Optional, Callable, Union, Awaitable
 
 def workflow(*args, **kwargs):
     return DBOS.workflow(*args, **kwargs)
 
+def step(
+    *,
+    name: Optional[str] = None,
+    retries_allowed: bool = False,
+    interval_seconds: float = 1.0,
+    max_attempts: int = 3,
+    backoff_rate: float = 2.0,
+    should_retry: Optional[
+        Callable[[BaseException], Union[bool, Awaitable[bool]]]
+    ] = None,
+):
+    return DBOS.step(
+        name=name,
+        retries_allowed=retries_allowed,
+        interval_seconds=interval_seconds,
+        max_attempts=max_attempts,
+        backoff_rate=backoff_rate,
+        should_retry=should_retry,
+    )
 
-def step(*args, **kwargs):
-    return DBOS.step(*args, **kwargs)
-
-
-sleep = DBOS.sleep
-
+def sleep(*args, **kwargs):
+    return DBOS.sleep(*args, **kwargs)
 
 def init(
     name: str,
