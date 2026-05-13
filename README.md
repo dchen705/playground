@@ -70,7 +70,7 @@ The SDK lives in `sdk/src/sdk/`. Since it's installed as an editable package, yo
 **Current public API:**
 
 ```python
-from sdk import init, workflow, step, sleep
+from sdk import init, workflow, step, sleep, agentic_runner
 ```
 
 | Function | What it does |
@@ -79,6 +79,7 @@ from sdk import init, workflow, step, sleep
 | `@workflow()` | Mark a function as a durable workflow |
 | `@step()` | Mark a function as a checkpointed step |
 | `sleep(seconds)` | Durable sleep — skips elapsed time on crash recovery |
+| `agentic_runner(agent, prompt)` | Run an OpenAI Agents SDK agent through DBOS |
 
 **Writing a new test:**
 

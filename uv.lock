@@ -1227,10 +1227,14 @@ version = "0.1.0"
 source = { editable = "sdk" }
 dependencies = [
     { name = "dbos" },
+    { name = "dbos-openai-agents" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "dbos", specifier = ">=1.0" }]
+requires-dist = [
+    { name = "dbos", specifier = ">=1.0" },
+    { name = "dbos-openai-agents", specifier = ">=0.3.0" },
+]
 
 [[package]]
 name = "shellingham"
