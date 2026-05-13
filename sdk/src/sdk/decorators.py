@@ -2,8 +2,15 @@ import os
 from dbos import DBOS, DBOSConfig
 from typing import Optional, Callable, Union, Awaitable
 
-def workflow(*args, **kwargs):
-    return DBOS.workflow(*args, **kwargs)
+def workflow(
+    *,
+    name: str | None = None,
+    max_recovery_attempts: int | None = 10
+):
+    return DBOS.workflow(
+        name=name,
+        max_recovery_attempts=max_recovery_attempts
+    )
 
 def step(
     *,
