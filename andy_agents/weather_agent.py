@@ -8,6 +8,7 @@ from dbos_openai_agents import DBOSRunner
 from dotenv import load_dotenv
 from fastapi import FastAPI, Path as FastAPIPath, Query
 from pydantic import BaseModel, Field
+from sdk import workflow, step, agentic_runner
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT_DIR / ".env")
@@ -37,7 +38,8 @@ class AgentResponse(BaseModel):
 
 
 @function_tool
-@DBOS.step()
+# @DBOS.step()
+@step()
 async def get_weather(city: str) -> str:
     """Get the current weather for a city."""
     DBOS.logger.info("Tool input: get_weather(city=%s)", city)
@@ -63,7 +65,8 @@ def crash_once_during_forecast(workflow_id: str) -> None:
 
 
 @function_tool
-@DBOS.step()
+# @DBOS.step()
+@step()
 async def get_forecast(city: str, days: int, current_weather: str) -> str:
     """Get a forecast using the exact current-weather evidence from get_weather."""
     DBOS.logger.info(
@@ -93,7 +96,8 @@ async def get_forecast(city: str, days: int, current_weather: str) -> str:
 
 
 @function_tool
-@DBOS.step()
+# @DBOS.step()
+@step()
 async def get_air_quality(city: str, forecast_summary: str) -> str:
     """Get air quality using the exact forecast evidence from get_forecast."""
     DBOS.logger.info(
@@ -121,7 +125,8 @@ async def get_air_quality(city: str, forecast_summary: str) -> str:
 
 
 @function_tool
-@DBOS.step()
+# @DBOS.step()
+@step()
 async def get_activity_recommendations(city: str, planning_context: str) -> str:
     """Get activity recommendations using the exact combined planning context."""
     DBOS.logger.info(
@@ -195,9 +200,11 @@ def expand_prompt(message: str) -> str:
     )
 
 
-@DBOS.workflow()
+# @DBOS.workflow()
+@workflow()
 async def run_agent(message: str) -> dict[str, str]:
-    result = await DBOSRunner.run(agent, expand_prompt(message))
+    # result = await DBOSRunner.run(agent, expand_prompt(message))
+    result = await agentic_runner(agent, expand_prompt(message))
 
     return {
         "workflow_id": DBOS.workflow_id,

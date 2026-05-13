@@ -1,13 +1,17 @@
 import os
 from dbos import DBOS, DBOSConfig
 
+
 def workflow(*args, **kwargs):
     return DBOS.workflow(*args, **kwargs)
+
 
 def step(*args, **kwargs):
     return DBOS.step(*args, **kwargs)
 
+
 sleep = DBOS.sleep
+
 
 def init(
     name: str,
@@ -28,7 +32,8 @@ def init(
         "otlp_attributes": {"env": resolved_env, "sdk": "checkpoint"},
         "otel_attribute_format": "semconv",
         # Safe default for connection poolers (Supabase, PgBouncer, Neon)
-        "use_listen_notify": resolved_db is not None and resolved_db.startswith("postgresql"),
+        "use_listen_notify": resolved_db is not None
+        and resolved_db.startswith("postgresql"),
     }
 
     DBOS(config=config)
