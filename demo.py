@@ -1,35 +1,31 @@
 # to run, from playground directory
-# uv run uvicorn tests.open_inference_test:app --reload
+# uv run uvicorn demo:app --reload
 import os
 from pathlib import Path
 
+from contextlib import asynccontextmanager
+
 from agents import Agent, function_tool
-from dbos import DBOS, DBOSConfig, SetWorkflowID
+from dbos import DBOS, SetWorkflowID
 from dbos._error import DBOSNonExistentWorkflowError
-from dbos_openai_agents import DBOSRunner
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from fastapi import FastAPI, Path as FastAPIPath, Query
 from pydantic import BaseModel, Field
-from sdk import workflow, step, agentic_runner
+from sdk import workflow, step, agentic_runner, init as sdk_init
 
-from openinference.instrumentation.openai_agents import OpenAIAgentsInstrumentor
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk import trace as trace_sdk
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+load_dotenv(find_dotenv())
 
-endpoint = "http://127.0.0.1:6006/v1/traces"
-tracer_provider = trace_sdk.TracerProvider()
-tracer_provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter(endpoint)))
-tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-trace.set_tracer_provider(tracer_provider)
 
-OpenAIAgentsInstrumentor().instrument(tracer_provider=tracer_provider)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    sdk_init(
+        name=os.environ.get("DBOS_APP_NAME", "agent-demo"),
+        db_url=os.environ.get("DBOS_SYSTEM_DATABASE_URL"),
+    )
+    yield
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT_DIR / ".env")
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
 SAMPLE_MESSAGE = (
     "Plan a day in San Francisco based on weather, forecast, air quality, "
@@ -58,9 +54,7 @@ class AgentResponse(BaseModel):
 @step()
 async def get_weather(city: str) -> str:
     """Get the current weather for a city."""
-    DBOS.logger.info("Tool input: get_weather(city=%s)", city)
     result = f"{city}: sunny, 68F, light west wind, comfortable humidity."
-    DBOS.logger.info("Tool output: get_weather -> %s", result)
     return result
 
 
@@ -71,12 +65,10 @@ def crash_once_during_forecast(workflow_id: str) -> None:
 
     marker_path = CRASH_MARKER_DIR / workflow_id.replace("/", "_")
     if marker_path.exists():
-        DBOS.logger.info("Crash marker already exists; continuing forecast")
         return
 
     CRASH_MARKER_DIR.mkdir(parents=True, exist_ok=True)
     marker_path.write_text("crashed once during forecast\n", encoding="utf-8")
-    DBOS.logger.info("Intentional demo crash during get_forecast")
     os._exit(42)
 
 
@@ -85,28 +77,19 @@ def crash_once_during_forecast(workflow_id: str) -> None:
 @step()
 async def get_forecast(city: str, days: int, current_weather: str) -> str:
     """Get a forecast using the exact current-weather evidence from get_weather."""
-    DBOS.logger.info(
-        "Tool input: get_forecast(city=%s, days=%s, current_weather=%s)",
-        city,
-        days,
-        current_weather,
-    )
     if current_weather.strip().upper() == "PENDING" or not current_weather.startswith(
         f"{city}:"
     ):
-        result = (
+        return (
             "DEPENDENCY_MISSING: call get_weather first, then pass its exact "
             "output as current_weather."
         )
-        DBOS.logger.info("Tool output: get_forecast -> %s", result)
-        return result
 
     result = (
         f"{city}: next {days} days stay mild. Morning fog clears by 10 AM, "
         "afternoons are mostly sunny, evening temperatures fall into the low 60s. "
         f"Current-weather basis: {current_weather}"
     )
-    DBOS.logger.info("Tool output: get_forecast -> %s", result)
     crash_once_during_forecast(DBOS.workflow_id)
     return result
 
@@ -116,28 +99,19 @@ async def get_forecast(city: str, days: int, current_weather: str) -> str:
 @step()
 async def get_air_quality(city: str, forecast_summary: str) -> str:
     """Get air quality using the exact forecast evidence from get_forecast."""
-    DBOS.logger.info(
-        "Tool input: get_air_quality(city=%s, forecast_summary=%s)",
-        city,
-        forecast_summary,
-    )
     if (
         forecast_summary.strip().upper() == "PENDING"
         or "Current-weather basis:" not in forecast_summary
     ):
-        result = (
+        return (
             "DEPENDENCY_MISSING: call get_forecast first, then pass its exact "
             "output as forecast_summary."
         )
-        DBOS.logger.info("Tool output: get_air_quality -> %s", result)
-        return result
 
-    result = (
+    return (
         f"{city}: AQI 42, good air quality, low pollen, no smoke advisory. "
         f"Forecast basis: {forecast_summary}"
     )
-    DBOS.logger.info("Tool output: get_air_quality -> %s", result)
-    return result
 
 
 @function_tool
@@ -145,31 +119,22 @@ async def get_air_quality(city: str, forecast_summary: str) -> str:
 @step()
 async def get_activity_recommendations(city: str, planning_context: str) -> str:
     """Get activity recommendations using the exact combined planning context."""
-    DBOS.logger.info(
-        "Tool input: get_activity_recommendations(city=%s, planning_context=%s)",
-        city,
-        planning_context,
-    )
     if (
         planning_context.strip().upper() == "PENDING"
         or "AQI" not in planning_context
         or "forecast" not in planning_context.lower()
     ):
-        result = (
+        return (
             "DEPENDENCY_MISSING: call get_air_quality first, then pass a combined "
             "planning_context containing the weather, forecast, and air-quality "
             "outputs."
         )
-        DBOS.logger.info("Tool output: get_activity_recommendations -> %s", result)
-        return result
 
-    result = (
+    return (
         f"{city}: good fits include a late-morning waterfront walk, outdoor "
         "lunch, an afternoon museum stop if wind picks up, and sunset at Twin Peaks. "
         f"Planning basis: {planning_context}"
     )
-    DBOS.logger.info("Tool output: get_activity_recommendations -> %s", result)
-    return result
 
 
 agent = Agent(
@@ -228,17 +193,6 @@ async def run_agent(message: str) -> dict[str, str]:
         "note": CONDUCTOR_NOTE,
     }
 
-
-@app.on_event("startup")
-async def startup() -> None:
-    config: DBOSConfig = {
-        "name": os.environ.get("DBOS_APP_NAME", "agent-demo"),
-        "system_database_url": os.environ["DBOS_SYSTEM_DATABASE_URL"],
-        "conductor_key": os.environ["DBOS_CONDUCTOR_KEY"],
-    }
-
-    DBOS(config=config)
-    DBOS.launch()
 
 
 @app.get("/health")

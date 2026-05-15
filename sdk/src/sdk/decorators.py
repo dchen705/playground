@@ -134,3 +134,8 @@ def _instrument_openai_agents() -> None:
     from openinference.instrumentation.openai_agents import OpenAIAgentsInstrumentor
 
     OpenAIAgentsInstrumentor().instrument(tracer_provider=trace.get_tracer_provider())
+
+
+# Logger available to SDK users for optional console output.
+# Wraps DBOS.logger — a class-level logging.Logger, available before init().
+logger = DBOS.logger
