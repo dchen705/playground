@@ -1,28 +1,45 @@
 """
-FastAPI dashboard backend — exposes DBOS + Phoenix JOIN logic via HTTP.
-Run: uv run uvicorn dashboard_backend:app --reload
+FastAPI dashboard backend — Postgres-only, no Phoenix required.
+
+## Setup
+  1. Make sure `.env` has:
+     DBOS_SYSTEM_DATABASE_URL=postgresql://...
+     OPENAI_API_KEY=...
+     DBOS_CONDUCTOR_KEY=dbos...
+
+  ## Run
+  # Run the agent (pick any topic)
+  uv run tests/research_agent.py "your topic here"
+
+  # Start the backend
+  uv run uvicorn dashboard_backend:app --reload
+
+  ## Test
+  # Open http://localhost:8000/docs
+  # GET /workflows?limit=1   → grab the workflow_uuid
+  # GET /workflows/{uuid}    → see the full JOIN with LLM + step data
 """
 import json
-import sqlite3
-import sys
+import os
 import textwrap
-import urllib.parse
-import urllib.request
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any, Optional
 
+import psycopg2
+import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
-# mordec_ai_agents has no __init__.py — add its directory to sys.path
-sys.path.insert(0, str(Path(__file__).parent / "mordec_ai_agents"))
-from agent import run_agent  # noqa: E402
+from dotenv import load_dotenv
+load_dotenv()
 
-DB_PATH = "research_assistant.sqlite"
-PHOENIX_BASE = "http://localhost:6006"
-PHOENIX_PROJECT = "default"
-PHOENIX_OTLP = "http://localhost:6006/v1/traces"
+from tests.research_agent import run_agent  # registers the @workflow with DBOS
+
+DB_URL = (
+    os.environ.get("DB_URL")
+    or os.environ.get("DBOS_SYSTEM_DATABASE_URL")
+    or ""
+)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -64,128 +81,122 @@ class RunAgentResponse(BaseModel):
     output: str
 
 
-# ── DBOS data access ──────────────────────────────────────────────────────────
-
-def _db() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    return con
+class ResumeWorkflowRequest(BaseModel):
+    workflow_uuid: str
 
 
-def list_workflows_db(status: Optional[str] = None, limit: int = 50) -> list[dict]:
-    con = _db()
-    cur = con.cursor()
+class ResumeWorkflowResponse(BaseModel):
+    workflow_uuid: str
+    status: str
+    output: Optional[str]
+
+
+# ── DBOS data access (via Python API — no raw SQL against dbos.* tables) ─────
+
+def list_workflows_dbos(status: Optional[str] = None, limit: int = 50) -> list[dict]:
+    from dbos import DBOS
+    kwargs: dict = {"limit": limit, "sort_desc": True, "load_input": False, "load_output": False}
     if status:
-        cur.execute(
-            "SELECT workflow_uuid, name, status, created_at, updated_at,"
-            " recovery_attempts FROM workflow_status"
-            " WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-            (status, limit),
-        )
-    else:
-        cur.execute(
-            "SELECT workflow_uuid, name, status, created_at, updated_at,"
-            " recovery_attempts FROM workflow_status"
-            " ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
-    rows = [dict(r) for r in cur.fetchall()]
-    con.close()
-    return rows
+        kwargs["status"] = status
+    results = DBOS.list_workflows(**kwargs)
+    return [_wf_to_dict(w) for w in results]
 
 
-def get_workflow_db(workflow_uuid: str) -> Optional[dict]:
-    con = _db()
-    cur = con.cursor()
-    cur.execute(
-        "SELECT * FROM workflow_status WHERE workflow_uuid = ?", (workflow_uuid,)
+def get_workflow_dbos(workflow_uuid: str) -> Optional[dict]:
+    from dbos import DBOS
+    results = DBOS.list_workflows(
+        workflow_ids=[workflow_uuid], load_input=False, load_output=False
     )
-    row = cur.fetchone()
-    con.close()
-    return dict(row) if row else None
+    return _wf_to_dict(results[0]) if results else None
 
 
-def get_steps_db(workflow_uuid: str) -> list[dict]:
-    con = _db()
-    cur = con.cursor()
+def get_steps_dbos(workflow_uuid: str) -> list[dict]:
+    from dbos import DBOS
+    return DBOS.list_workflow_steps(workflow_uuid)
+
+
+def _wf_to_dict(w) -> dict:
+    return {
+        "workflow_uuid":      w.workflow_id,
+        "name":               w.name,
+        "status":             w.status,
+        "created_at":         w.created_at,
+        "updated_at":         w.updated_at,
+        "recovery_attempts":  None,  # not exposed in WorkflowStatus
+    }
+
+
+# ── Span data access (our public schema via OurSpanExporter) ─────────────────
+
+def _spans_db() -> psycopg2.extensions.connection:
+    conn = psycopg2.connect(DB_URL)
+    conn.autocommit = True
+    return conn
+
+
+def fetch_spans_for_workflow(workflow_uuid: str) -> list[dict]:
+    """Return all spans for the trace linked to this workflow_uuid."""
+    conn = _spans_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        "SELECT * FROM operation_outputs WHERE workflow_uuid = ? ORDER BY function_id",
+        """
+        SELECT s.span_id, s.parent_span_id, s.span_kind,
+               s.attributes, s.dbos_step_id, s.name
+        FROM spans s
+        JOIN traces t ON t.trace_id = s.trace_id
+        WHERE t.workflow_id = %s
+        ORDER BY s.start_time
+        """,
         (workflow_uuid,),
     )
     rows = [dict(r) for r in cur.fetchall()]
-    con.close()
+    cur.close()
+    conn.close()
     return rows
-
-
-# ── Phoenix data access ───────────────────────────────────────────────────────
-
-def _phoenix_get(path: str) -> dict:
-    with urllib.request.urlopen(f"{PHOENIX_BASE}{path}") as r:
-        return json.loads(r.read())
-
-
-def fetch_phoenix_spans(workflow_uuid: str, workflow_name: str) -> list[dict]:
-    """Return all spans in the trace for this workflow. Empty list on any error."""
-    try:
-        attr = urllib.parse.quote(f"operationUUID:{workflow_uuid}")
-        resp = _phoenix_get(
-            f"/v1/projects/{PHOENIX_PROJECT}/spans?attribute={attr}&limit=50"
-        )
-
-        trace_id = next(
-            (s["context"]["trace_id"] for s in resp["data"] if s["name"] == workflow_name),
-            None,
-        )
-        if not trace_id:
-            return []
-
-        all_resp = _phoenix_get(
-            f"/v1/projects/{PHOENIX_PROJECT}/spans?trace_id={trace_id}&limit=200"
-        )
-        return all_resp["data"]
-    except Exception:
-        return []
 
 
 # ── JOIN logic ────────────────────────────────────────────────────────────────
 
-def build_step_records(
-    ops: list[dict], all_spans: list[dict], workflow_name: str
-) -> list[dict]:
+def build_step_records(steps: list[dict], all_spans: list[dict]) -> list[dict]:
     """
-    JOIN operation_outputs rows with Phoenix spans on function_id == dbos.step_id.
-    Returns dicts matching the StepRecord schema. Phoenix fields are None when
-    spans are unavailable.
+    JOIN DBOS step records with span data on dbos_step_id == function_id.
+
+    Span tree shape (OpenInference / OpenAI Agents SDK):
+        turn (CHAIN)
+        ├── response (LLM)              ← model name + token counts
+        └── search_web (TOOL, step)     ← step span IS the tool span; tool args live here
     """
-    by_id: dict[str, dict] = {s["context"]["span_id"]: s for s in all_spans}
     children: dict[Optional[str], list[dict]] = {}
     for s in all_spans:
-        children.setdefault(s.get("parent_id"), []).append(s)
+        children.setdefault(s["parent_span_id"], []).append(s)
 
-    step_spans_by_id: dict[int, dict] = {
-        int(s["attributes"]["dbos.step_id"]): s
+    step_spans_by_step_id: dict[int, dict] = {
+        s["dbos_step_id"]: s
         for s in all_spans
-        if s["span_kind"] == "UNKNOWN"
-        and s["name"] != workflow_name
-        and "dbos.step_id" in s.get("attributes", {})
+        if s["dbos_step_id"] is not None
     }
 
     records = []
-    for op in ops:
-        step_span = step_spans_by_id.get(op["function_id"])
-        tool_span = by_id.get(step_span.get("parent_id")) if step_span else None
+    for step in steps:
+        step_span = step_spans_by_step_id.get(step["function_id"])
 
-        llm_span = None
-        if tool_span:
-            siblings = children.get(tool_span.get("parent_id"), [])
-            llm_span = next((s for s in siblings if s["span_kind"] == "LLM"), None)
+        # Tool args live on the step span itself (it IS the TOOL span)
+        tool_attrs: dict = (step_span["attributes"] or {}) if step_span else {}
+
+        # The step span's parent is the turn (CHAIN); response (LLM) is a sibling
+        llm_attrs: dict = {}
+        if step_span and step_span.get("parent_span_id"):
+            turn_id = step_span["parent_span_id"]
+            llm_span = next(
+                (s for s in children.get(turn_id, []) if s["span_kind"] == "LLM"),
+                None,
+            )
+            if llm_span:
+                llm_attrs = llm_span["attributes"] or {}
 
         duration_ms = None
-        if op.get("started_at_epoch_ms") and op.get("completed_at_epoch_ms"):
-            duration_ms = op["completed_at_epoch_ms"] - op["started_at_epoch_ms"]
-
-        tool_attrs = tool_span["attributes"] if tool_span else {}
-        llm_attrs = llm_span["attributes"] if llm_span else {}
+        if step.get("started_at_epoch_ms") and step.get("completed_at_epoch_ms"):
+            duration_ms = step["completed_at_epoch_ms"] - step["started_at_epoch_ms"]
 
         raw_args = tool_attrs.get("input.value", "")
         try:
@@ -198,64 +209,46 @@ def build_step_records(
         tok_in = llm_attrs.get("llm.token_count.prompt")
         tok_out = llm_attrs.get("llm.token_count.completion")
 
-        records.append(
-            {
-                "step_id":       op["function_id"],
-                "function_name": op["function_name"],
-                "status":        "SUCCESS" if op.get("error") is None else "ERROR",
-                "duration_ms":   duration_ms,
-                "llm_model":     llm_attrs.get("llm.model_name"),
-                "tokens_in":     int(tok_in) if tok_in is not None else None,
-                "tokens_out":    int(tok_out) if tok_out is not None else None,
-                "tool_name":     tool_attrs.get("tool.name"),
-                "tool_args":     short_args,
-            }
-        )
+        records.append({
+            "step_id":       step["function_id"],
+            "function_name": step["function_name"],
+            "status":        "SUCCESS" if step.get("error") is None else "ERROR",
+            "duration_ms":   duration_ms,
+            "llm_model":     llm_attrs.get("llm.model_name"),
+            "tokens_in":     int(tok_in) if tok_in is not None else None,
+            "tokens_out":    int(tok_out) if tok_out is not None else None,
+            "tool_name":     tool_attrs.get("tool.name") or step["function_name"],
+            "tool_args":     short_args,
+        })
     return records
 
 
-# ── App startup: OTel + DBOS initialized once ────────────────────────────────
+# ── App startup ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from dbos import DBOS, DBOSConfig
-    from opentelemetry import trace
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from openinference.instrumentation.openai_agents import OpenAIAgentsInstrumentor
-
-    tp = TracerProvider()
-    tp.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=PHOENIX_OTLP)))
-    trace.set_tracer_provider(tp)
-    OpenAIAgentsInstrumentor().instrument(tracer_provider=tp)
-
-    config: DBOSConfig = {
-        "name": "research-assistant",
-        "enable_otlp": True,
-    }
-    DBOS(config=config)
-    DBOS.launch()
-
+    from sdk import init
+    init(
+        name="research-assistant",
+        db_url=DB_URL or None,
+    )
     yield
 
-    tp.shutdown()
+
+app = FastAPI(title="Checkpoint Dashboard", version="0.2.0", lifespan=lifespan)
 
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
-
-app = FastAPI(title="Checkpoint Dashboard", version="0.1.0", lifespan=lifespan)
-
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/workflows", response_model=list[WorkflowSummary])
 def get_workflows(
     status: Optional[str] = Query(
-        None, description="Filter by workflow status (PENDING, SUCCESS, ERROR)"
+        None, description="Filter by status (PENDING, SUCCESS, ERROR)"
     ),
     limit: int = Query(50, ge=1, le=1000, description="Maximum results to return"),
 ):
     """List workflows from DBOS, newest first."""
-    rows = list_workflows_db(status=status, limit=limit)
+    rows = list_workflows_dbos(status=status, limit=limit)
     return [
         WorkflowSummary(
             workflow_uuid=r["workflow_uuid"],
@@ -271,16 +264,16 @@ def get_workflows(
 
 @app.get("/workflows/{workflow_id}", response_model=WorkflowDetail)
 def get_workflow_detail(workflow_id: str):
-    """Return full workflow info + unified per-step JOIN of DBOS + Phoenix data."""
-    wf = get_workflow_db(workflow_id)
+    """Return full workflow info + per-step JOIN of DBOS steps + span data."""
+    wf = get_workflow_dbos(workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail=f"Workflow {workflow_id!r} not found")
 
-    ops = get_steps_db(workflow_id)
-    all_spans = fetch_phoenix_spans(workflow_id, wf["name"])
-    steps = build_step_records(ops, all_spans, wf["name"])
+    steps = get_steps_dbos(workflow_id)
+    all_spans = fetch_spans_for_workflow(workflow_id)
+    step_records = build_step_records(steps, all_spans)
 
-    return WorkflowDetail(workflow=wf, steps=steps)
+    return WorkflowDetail(workflow=wf, steps=step_records)
 
 
 @app.post("/run-agent", response_model=RunAgentResponse)
@@ -312,28 +305,13 @@ async def trigger_run_agent(body: RunAgentRequest):
     )
 
 
-class ResumeWorkflowRequest(BaseModel):
-    workflow_uuid: str
-
-
-class ResumeWorkflowResponse(BaseModel):
-    workflow_uuid: str
-    status: str
-    output: Optional[str]
-
-
 @app.post("/resume-workflow", response_model=ResumeWorkflowResponse)
 async def resume_workflow(body: ResumeWorkflowRequest):
-    """Reconnect to an existing workflow by UUID and return its result.
-
-    Returns 404 if the UUID is not found, 400 if the workflow already
-    completed (SUCCESS or ERROR) and cannot be meaningfully resumed.
-    Blocks until the workflow completes if it is still running.
-    """
+    """Reconnect to an existing PENDING workflow and wait for its result."""
     from dbos import DBOS
     from dbos._error import DBOSNonExistentWorkflowError
 
-    wf = get_workflow_db(body.workflow_uuid)
+    wf = get_workflow_dbos(body.workflow_uuid)
     if wf is None:
         raise HTTPException(
             status_code=404,
@@ -342,7 +320,7 @@ async def resume_workflow(body: ResumeWorkflowRequest):
     if wf["status"] in ("SUCCESS", "ERROR"):
         raise HTTPException(
             status_code=400,
-            detail=f"Workflow {body.workflow_uuid!r} has already finished with status {wf['status']!r}",
+            detail=f"Workflow {body.workflow_uuid!r} already finished with status {wf['status']!r}",
         )
 
     try:
@@ -354,7 +332,7 @@ async def resume_workflow(body: ResumeWorkflowRequest):
         )
 
     output = await handle.get_result()
-    wf = get_workflow_db(body.workflow_uuid)
+    wf = get_workflow_dbos(body.workflow_uuid)
     return ResumeWorkflowResponse(
         workflow_uuid=body.workflow_uuid,
         status=wf["status"] if wf else "UNKNOWN",

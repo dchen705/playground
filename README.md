@@ -1,5 +1,23 @@
 # Durable Execution Playground
 
+## Testing dashboard backend (without phoenix + using postgres)
+Setup
+  1. Make sure `.env` has:
+     DBOS_SYSTEM_DATABASE_URL=postgresql://...
+     OPENAI_API_KEY=...
+
+ Run
+ Run the agent (pick any topic)
+  uv run tests/research_agent.py "your topic here"
+
+  Start the backend
+  uv run uvicorn dashboard_backend:app --reload
+
+Test
+   Open http://localhost:8000/docs
+   GET /workflows?limit=1   → grab the workflow_uuid
+   GET /workflows/{uuid}    → see the full JOIN with LLM + step data
+
 A development space for building and testing our SDK — a durable execution wrapper over DBOS for agents and agentic workflows.
 
 ## Structure

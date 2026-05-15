@@ -9,10 +9,25 @@ def workflow(
     name: str | None = None,
     max_recovery_attempts: int | None = 10
 ):
-    return DBOS.workflow(
-        name=name,
-        max_recovery_attempts=max_recovery_attempts
-    )
+    dbos_workflow = DBOS.workflow(name=name, max_recovery_attempts=max_recovery_attempts)
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def with_root_span(*args, **kwargs):
+            from opentelemetry import trace
+            tracer = trace.get_tracer("sdk")
+            # DBOS has set up its context by the time it calls this function,
+            # so DBOS.workflow_id is available here. We create the trace root span
+            # and stamp the workflow_id so the exporter can populate traces.workflow_id.
+            with tracer.start_as_current_span(fn.__name__) as span:
+                wf_id = DBOS.workflow_id
+                if wf_id and span.is_recording():
+                    span.set_attribute("dbos.workflow_id", wf_id)
+                return await fn(*args, **kwargs)
+
+        return dbos_workflow(with_root_span)
+
+    return decorator
 
 def step(
     *,
@@ -66,7 +81,12 @@ def init(
     env: str | None = None,
 ) -> None:
     resolved_env = env or os.environ.get("CHECKPOINT_ENV", "development")
-    resolved_db = db_url or os.environ.get("CHECKPOINT_DB_URL")
+    resolved_db = (
+        db_url
+        or os.environ.get("DB_URL")
+        or os.environ.get("DBOS_SYSTEM_DATABASE_URL")
+        or os.environ.get("CHECKPOINT_DB_URL")
+    )
     resolved_conductor_key = conductor_key or os.environ.get("CHECKPOINT_CONDUCTOR_KEY")
 
     config: DBOSConfig = {
@@ -88,3 +108,29 @@ def init(
 
     DBOS(config=config)
     DBOS.launch()
+
+    if resolved_db and resolved_db.startswith("postgresql"):
+        _add_our_span_exporter(resolved_db)
+
+    _instrument_openai_agents()
+
+
+def _add_our_span_exporter(db_url: str) -> None:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from sdk.exporter import OurSpanExporter
+
+    provider = trace.get_tracer_provider()
+    if not isinstance(provider, TracerProvider):
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+
+    provider.add_span_processor(BatchSpanProcessor(OurSpanExporter(db_url=db_url)))
+
+
+def _instrument_openai_agents() -> None:
+    from opentelemetry import trace
+    from openinference.instrumentation.openai_agents import OpenAIAgentsInstrumentor
+
+    OpenAIAgentsInstrumentor().instrument(tracer_provider=trace.get_tracer_provider())
