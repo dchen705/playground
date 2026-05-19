@@ -105,14 +105,14 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/workflows", response_model=list[WorkflowSummary])
-def get_workflows(
+async def get_workflows(
     status: Optional[str] = Query(
         None, description="Filter by status (PENDING, SUCCESS, ERROR)"
     ),
     limit: int = Query(50, ge=1, le=1000, description="Maximum results to return"),
 ):
     """List workflows from DBOS, newest first."""
-    rows = list_workflows(status=status, limit=limit)
+    rows = await list_workflows(status=status, limit=limit)
     return [
         WorkflowSummary(
             workflow_id=r["workflow_id"],
@@ -127,13 +127,13 @@ def get_workflows(
 
 
 @app.get("/workflows/{workflow_id}", response_model=WorkflowDetail)
-def get_workflow_detail(workflow_id: str):
+async def get_workflow_detail(workflow_id: str):
     """Return workflow info, enriched step history, and raw agent events."""
-    wf = get_workflow(workflow_id)
+    wf = await get_workflow(workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail=f"Workflow {workflow_id!r} not found")
 
-    steps = get_steps(workflow_id)
+    steps = await get_steps(workflow_id)
     agent_events = fetch_agent_events(workflow_id, DB_URL) if DB_URL else []
     step_records = build_step_records(steps, agent_events)
 

@@ -22,29 +22,29 @@ def _wf_to_dict(w) -> dict:
     }
 
 
-def list_workflows(status: Optional[str] = None, limit: int = 50) -> list[dict]:
+async def list_workflows(status: Optional[str] = None, limit: int = 50) -> list[dict]:
     """List workflows from DBOS, newest first."""
     from dbos import DBOS
     kwargs: dict = {"limit": limit, "sort_desc": True, "load_input": False, "load_output": False}
     if status:
         kwargs["status"] = status
-    results = DBOS.list_workflows(**kwargs)
+    results = await DBOS.list_workflows_async(**kwargs)
     return [_wf_to_dict(w) for w in results]
 
 
-def get_workflow(workflow_uuid: str) -> Optional[dict]:
+async def get_workflow(workflow_uuid: str) -> Optional[dict]:
     """Return a single workflow by ID, or None if not found."""
     from dbos import DBOS
-    results = DBOS.list_workflows(
+    results = await DBOS.list_workflows_async(
         workflow_ids=[workflow_uuid], load_input=False, load_output=False
     )
     return _wf_to_dict(results[0]) if results else None
 
 
-def get_steps(workflow_uuid: str) -> list[dict]:
+async def get_steps(workflow_uuid: str) -> list[dict]:
     """Return all step records for a workflow."""
     from dbos import DBOS
-    return DBOS.list_workflow_steps(workflow_uuid)
+    return await DBOS.list_workflow_steps_async(workflow_uuid)
 
 
 # ── Agent events ──────────────────────────────────────────────────────────────
