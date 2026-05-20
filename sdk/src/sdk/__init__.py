@@ -5,6 +5,8 @@ from .queries import (
     get_steps,
     build_step_records,
     fetch_agent_events,
+    fetch_agent_events_async,
+    fetch_agent_events_for_dashboard,
 )
 
 __all__ = [
@@ -19,4 +21,6 @@ __all__ = [
     "get_steps",
     "build_step_records",
     "fetch_agent_events",
+    "fetch_agent_events_async",
+    "fetch_agent_events_for_dashboard",
 ]

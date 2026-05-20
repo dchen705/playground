@@ -25,7 +25,7 @@ from sdk import (
     get_workflow,
     get_steps,
     build_step_records,
-    fetch_agent_events,
+    fetch_agent_events_for_dashboard,
 )
 
 load_dotenv()
@@ -49,8 +49,8 @@ class WorkflowSummary(BaseModel):
 
 
 class StepRecord(BaseModel):
-    step_id: int
-    function_name: str
+    step_id: Optional[int]
+    function_name: Optional[str]
     status: str
     duration_ms: Optional[int]
     llm_model: Optional[str]
@@ -59,6 +59,7 @@ class StepRecord(BaseModel):
     provider_response_id: Optional[str]
     tool_name: Optional[str]
     tool_args: Any | None
+    tool_match_status: Optional[str] = None
 
 
 class AgentEvent(BaseModel):
@@ -134,7 +135,7 @@ async def get_workflow_detail(workflow_id: str):
         raise HTTPException(status_code=404, detail=f"Workflow {workflow_id!r} not found")
 
     steps = await get_steps(workflow_id)
-    agent_events = fetch_agent_events(workflow_id, DB_URL) if DB_URL else []
+    agent_events = await fetch_agent_events_for_dashboard(workflow_id, DB_URL) if DB_URL else []
     step_records = build_step_records(steps, agent_events)
 
     return WorkflowDetail(workflow=wf, steps=step_records, events=agent_events)

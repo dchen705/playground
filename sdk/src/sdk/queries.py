@@ -6,7 +6,11 @@ Two layers:
   2. Agent events — fetch from agent_events table and enrich step records
 """
 
+import asyncio
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ── DBOS API wrappers ─────────────────────────────────────────────────────────
@@ -65,13 +69,27 @@ def fetch_agent_events(workflow_id: str, db_url: str) -> list[dict]:
                        from_agent, to_agent, captured_at
                 FROM agent_events
                 WHERE workflow_id = %s
-                ORDER BY captured_at
+                ORDER BY captured_at, id
                 """,
                 (workflow_id,),
             )
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+async def fetch_agent_events_async(workflow_id: str, db_url: str) -> list[dict]:
+    """Return workflow agent events without blocking the FastAPI event loop."""
+    return await asyncio.to_thread(fetch_agent_events, workflow_id, db_url)
+
+
+async def fetch_agent_events_for_dashboard(workflow_id: str, db_url: str) -> list[dict]:
+    """Best-effort dashboard read; DBOS workflow/step data should still render on failure."""
+    try:
+        return await fetch_agent_events_async(workflow_id, db_url)
+    except Exception:
+        logger.exception("Failed to fetch agent_events for workflow %s", workflow_id)
+        return []
 
 
 # ── Step shaping ──────────────────────────────────────────────────────────────
@@ -89,16 +107,16 @@ def build_step_records(
     Falls back to DBOS-only shape when agent_events is None or empty.
     """
     # Build lookup: step_id → first matching event of each relevant type.
-    # tool_call events from sync tools carry step_id=null (the on_span_end fires
-    # after the DBOS step context unwinds in the thread executor). For those we
-    # fall back to positional matching by tool_name below.
+    # Older tool_call rows from sync tools can carry step_id=null when
+    # on_span_end fires after the DBOS step context unwinds. Those rows are
+    # attached only when there is a single unambiguous DBOS step candidate.
     llm_by_step: dict[int, dict] = {}
     tool_by_step: dict[int, dict] = {}
     unmatched_tools: dict[str, list[dict]] = {}  # tool_name → ordered list
     if agent_events:
         for event in agent_events:
             sid = event.get("step_id")
-            etype = event["event_type"]
+            etype = event.get("event_type")
             if etype == "llm_response":
                 if sid is not None and sid not in llm_by_step:
                     llm_by_step[sid] = event
@@ -106,20 +124,30 @@ def build_step_records(
                 if sid is not None and sid not in tool_by_step:
                     tool_by_step[sid] = event
                 elif sid is None:
-                    unmatched_tools.setdefault(event["tool_name"], []).append(event)
+                    tool_name = event.get("tool_name")
+                    if tool_name:
+                        unmatched_tools.setdefault(tool_name, []).append(event)
 
-    # Positional fallback: match unmatched tool_call events to tool steps
-    # by function_name in DBOS step order. Handles same-tool parallel calls
-    # correctly because both lists reflect actual execution order.
+    unmatched_tool_status_by_step: dict[int, str] = {}
+    candidate_steps_by_name: dict[str, list[int]] = {}
     for step in steps:
-        step_id = step["function_id"]
-        fn_name = step["function_name"]
-        if step_id not in tool_by_step and fn_name in unmatched_tools and unmatched_tools[fn_name]:
-            tool_by_step[step_id] = unmatched_tools[fn_name].pop(0)
+        step_id = step.get("function_id")
+        fn_name = step.get("function_name")
+        if step_id is not None and fn_name and step_id not in tool_by_step:
+            candidate_steps_by_name.setdefault(fn_name, []).append(step_id)
+
+    for tool_name, events in unmatched_tools.items():
+        candidates = candidate_steps_by_name.get(tool_name, [])
+        if len(events) == 1 and len(candidates) == 1:
+            tool_by_step[candidates[0]] = events[0]
+        else:
+            for step_id in candidates:
+                unmatched_tool_status_by_step[step_id] = "ambiguous"
 
     records = []
     for step in steps:
-        step_id = step["function_id"]
+        step_id = step.get("function_id")
+        fn_name = step.get("function_name")
         duration_ms = None
         if step.get("started_at_epoch_ms") and step.get("completed_at_epoch_ms"):
             duration_ms = step["completed_at_epoch_ms"] - step["started_at_epoch_ms"]
@@ -129,7 +157,7 @@ def build_step_records(
 
         records.append({
             "step_id":               step_id,
-            "function_name":         step["function_name"],
+            "function_name":         fn_name,
             "status":                "SUCCESS" if step.get("error") is None else "ERROR",
             "duration_ms":           duration_ms,
             # LLM fields — populated for _model_call_step rows
@@ -138,7 +166,8 @@ def build_step_records(
             "tokens_out":            llm.get("tokens_out"),
             "provider_response_id":  llm.get("provider_response_id"),
             # Tool fields — populated for tool step rows
-            "tool_name":             tool.get("tool_name") or step["function_name"],
+            "tool_name":             tool.get("tool_name") or fn_name,
             "tool_args":             tool.get("tool_args"),
+            "tool_match_status":     unmatched_tool_status_by_step.get(step_id),
         })
     return records

@@ -73,6 +73,10 @@ async def sleep(*args, **kwargs):
     return await DBOS.sleep_async(*args, **kwargs)
 
 
+async def agentic_runner(*args, **kwargs):
+    return await DBOSRunner.run(*args, **kwargs)
+
+
 logger = DBOS.logger
 
 
@@ -100,15 +104,9 @@ def init(
     DBOS.launch()
 
     if resolved_db and resolved_db.startswith("postgresql"):
-        from agents.tracing import add_trace_processor
-        from sdk.tracing import CheckpointTracingProcessor, ensure_tables
+        from sdk.tracing import register_checkpoint_tracing_processor
 
-        ensure_tables(resolved_db)
-        add_trace_processor(CheckpointTracingProcessor(resolved_db))
-
-
-async def agentic_runner(*args, **kwargs):
-    return await DBOSRunner.run(*args, **kwargs)
+        register_checkpoint_tracing_processor(resolved_db)
 
 
 def _log_step_started(step_name: str) -> float:
