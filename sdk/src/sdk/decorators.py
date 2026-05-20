@@ -38,6 +38,7 @@ def step(
         step_name = fn.__name__
 
         if asyncio.iscoroutinefunction(fn):
+
             @functools.wraps(fn)
             async def wrapped_step(*args: Any, **kwargs: Any):
                 started_at = _log_step_started(step_name)
@@ -48,7 +49,9 @@ def step(
                 except Exception as exc:
                     _log_step_failed(step_name, started_at, exc)
                     raise
+
         else:
+
             @functools.wraps(fn)
             def wrapped_step(*args: Any, **kwargs: Any):
                 started_at = _log_step_started(step_name)
@@ -68,7 +71,9 @@ def step(
 async def sleep(*args, **kwargs):
     return await DBOS.sleep_async(*args, **kwargs)
 
+
 logger = DBOS.logger
+
 
 def init(
     name: str,
@@ -96,8 +101,13 @@ def init(
     if resolved_db and resolved_db.startswith("postgresql"):
         from agents.tracing import add_trace_processor
         from sdk.tracing import CheckpointTracingProcessor, ensure_tables
+
         ensure_tables(resolved_db)
         add_trace_processor(CheckpointTracingProcessor(resolved_db))
+
+
+async def agentic_runner(*args, **kwargs):
+    return await DBOSRunner.run(*args, **kwargs)
 
 
 def _log_step_started(step_name: str) -> float:
@@ -110,4 +120,6 @@ def _log_step_succeeded(step_name: str, started_at: float) -> None:
 
 
 def _log_step_failed(step_name: str, started_at: float, exc: Exception) -> None:
-    logger.error("step %s failed (%.2fs): %s", step_name, time.monotonic() - started_at, exc)
+    logger.error(
+        "step %s failed (%.2fs): %s", step_name, time.monotonic() - started_at, exc
+    )
